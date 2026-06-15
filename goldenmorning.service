@@ -1,0 +1,14 @@
+[Unit]
+Description=Golden Morning - bot Telegram interactif (cours de l'or)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Golden-Morning
+ExecStart=/usr/bin/python3 /root/Golden-Morning/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
