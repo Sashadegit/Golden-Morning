@@ -2,7 +2,8 @@
 
 Répond aux commandes :
   /start   message d'accueil
-  /or      cours complet (once, gramme, lingot 1 kg, Napoléon)
+  /or      cours complet de l'or (once, gramme, lingot 1 kg, Napoléon) + Bitcoin
+  /btc     cours du Bitcoin en EUR
   /lingot  prix du lingot 1 kg
   /gramme  prix du gramme
   /test    vérifie que le bot est en ligne
@@ -18,7 +19,8 @@ import time
 import requests
 
 from gold_service import get_gold_quote
-from send_gold import _eur, _load_env, build_message, ONCE_EN_GRAMMES
+from btc_service import get_btc_quote
+from send_gold import _eur, _load_env, _ligne_variation, build_message, ONCE_EN_GRAMMES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("golden-morning-bot")
@@ -27,7 +29,8 @@ POLL_TIMEOUT = 30          # long polling Telegram
 HTTP_TIMEOUT = POLL_TIMEOUT + 10
 
 COMMANDS = [
-    {"command": "or", "description": "Cours complet de l'or en EUR"},
+    {"command": "or", "description": "Cours complet de l'or + Bitcoin"},
+    {"command": "btc", "description": "Cours du Bitcoin en EUR"},
     {"command": "lingot", "description": "Prix du lingot 1 kg"},
     {"command": "gramme", "description": "Prix du gramme d'or"},
     {"command": "test", "description": "Vérifier que le bot répond"},
@@ -51,15 +54,24 @@ def handle(text: str) -> str:
     if cmd == "/start":
         return (
             "🌅 *Bienvenue sur Golden Morning !*\n\n"
-            "Je t'envoie le cours de l'or chaque matin à *8h00*.\n\n"
+            "Je t'envoie le cours de l'or *et du Bitcoin* chaque matin à *8h00*.\n\n"
             "Commandes dispo à tout moment :\n"
-            "• /or — le cours complet\n"
+            "• /or — le cours complet (or + Bitcoin)\n"
+            "• /btc — le Bitcoin en EUR\n"
             "• /lingot — le lingot 1 kg\n"
             "• /gramme — le gramme\n"
             "• /test — vérifier que je réponds"
         )
     if cmd in ("/or", "/cours"):
         return build_message()
+    if cmd in ("/btc", "/bitcoin"):
+        b = get_btc_quote()
+        lignes = [f"₿ *Bitcoin* : *{_eur(b.price_eur, 0)} €*"]
+        ligne_var = _ligne_variation(b.change_pct, "Variation 24h")
+        if ligne_var:
+            lignes.append(ligne_var)
+        lignes.append(f"_Source : {b.source}_")
+        return "\n".join(lignes)
     if cmd == "/lingot":
         q = get_gold_quote()
         prix = q.price_eur / ONCE_EN_GRAMMES * 1000
@@ -71,7 +83,7 @@ def handle(text: str) -> str:
     if cmd == "/test":
         return "✅ Golden Morning est en ligne et opérationnel. Tape /or pour le cours."
     return (
-        "Je connais : /or, /lingot, /gramme, /test.\n"
+        "Je connais : /or, /btc, /lingot, /gramme, /test.\n"
         "Tape /start pour le menu."
     )
 
