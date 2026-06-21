@@ -3,11 +3,14 @@
 Lancé une fois par jour (cron à 8h). Lit le token et le chat cible depuis .env :
   - TELEGRAM_BOT_TOKEN
   - GOLDEN_CHAT_ID
+
+L'envoi est tenté plusieurs fois (retry) pour absorber un creux d'API à 8h pile.
 """
 from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import requests
@@ -18,6 +21,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("golden-morning")
 
 HTTP_TIMEOUT = 10
+MAX_TENTATIVES = 3        # nombre d'essais d'envoi
+DELAI_RETRY = 30          # secondes entre deux essais
 
 
 def _load_env() -> None:
@@ -88,7 +93,23 @@ def send(text: str) -> None:
 
 def main() -> None:
     _load_env()
-    send(build_message())
+    derniere_exc: Exception | None = None
+    for tentative in range(1, MAX_TENTATIVES + 1):
+        try:
+            send(build_message())
+            return
+        except Exception as exc:  # noqa: BLE001 - on retente
+            derniere_exc = exc
+            logger.warning(
+                "Tentative %d/%d échouée (%s)", tentative, MAX_TENTATIVES, exc
+            )
+            if tentative < MAX_TENTATIVES:
+                time.sleep(DELAI_RETRY)
+    logger.error(
+        "Envoi du cours de l'or définitivement échoué après %d tentatives : %s",
+        MAX_TENTATIVES, derniere_exc,
+    )
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

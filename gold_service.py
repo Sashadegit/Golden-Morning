@@ -3,6 +3,7 @@
 Sources (toutes gratuites, sans clé) :
   - Primaire : gold-api.com (XAU/USD) converti en EUR via Frankfurter (BCE),
                avec open.er-api.com en secours pour le taux de change.
+               La variation 24h est complétée en best-effort via CoinGecko PAXG.
   - Fallback : CoinGecko PAX Gold (PAXG ~ 1 once d'or), prix EUR + variation 24h.
 """
 from __future__ import annotations
@@ -43,15 +44,38 @@ def _usd_to_eur() -> float:
         return float(r.json()["rates"]["EUR"])
 
 
+def _fetch_change_24h() -> float | None:
+    """Variation 24h de l'or (%), best-effort via CoinGecko PAXG.
+
+    Sert à enrichir la source primaire, qui ne fournit pas la variation.
+    Renvoie None si indisponible (on n'échoue jamais pour ça).
+    """
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids": "pax-gold",
+                "vs_currencies": "eur",
+                "include_24hr_change": "true",
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+        r.raise_for_status()
+        return round(float(r.json()["pax-gold"]["eur_24h_change"]), 2)
+    except Exception as exc:  # noqa: BLE001 - simple enrichissement
+        logger.warning("Variation 24h indisponible (%s)", exc)
+        return None
+
+
 def _fetch_primary() -> GoldQuote:
-    """gold-api.com (XAU/USD sans clé) converti en EUR."""
+    """gold-api.com (XAU/USD sans clé) converti en EUR, variation via CoinGecko."""
     r = requests.get("https://api.gold-api.com/price/XAU", timeout=HTTP_TIMEOUT)
     r.raise_for_status()
     usd = float(r.json()["price"])
     eur_rate = _usd_to_eur()
     return GoldQuote(
         price_eur=round(usd * eur_rate, 2),
-        change_pct=None,
+        change_pct=_fetch_change_24h(),
         source="gold-api.com + Frankfurter",
         fetched_at=datetime.now(timezone.utc),
     )
