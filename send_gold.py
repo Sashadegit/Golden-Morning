@@ -1,10 +1,14 @@
-"""Envoie le cours quotidien de l'once d'or en EUR sur Telegram.
+"""Envoie le cours quotidien de l'once d'or en EUR (Telegram et/ou WhatsApp).
 
-Lancé une fois par jour (cron à 8h). Lit le token et le chat cible depuis .env :
-  - TELEGRAM_BOT_TOKEN
-  - GOLDEN_CHAT_ID
+Lancé une fois par jour (cron à 8h). Lit la config depuis .env :
+  - TELEGRAM_BOT_TOKEN + GOLDEN_CHAT_ID  -> envoi Telegram (si présents)
+  - WhatsApp via CallMeBot (gratuit), un ou plusieurs destinataires :
+      * CALLMEBOT_RECIPIENTS="+33xxx:cle1,+33yyy:cle2"   (plusieurs)
+      * ou CALLMEBOT_PHONE + CALLMEBOT_APIKEY            (un seul)
 
-L'envoi est tenté plusieurs fois (retry) pour absorber un creux d'API à 8h pile.
+Chaque destinataire/canal configuré reçoit le message, avec retry. Un canal qui
+échoue n'empêche pas les autres. Le formatage *gras* / _italique_ est compris
+aussi bien par Telegram (Markdown) que par WhatsApp.
 """
 from __future__ import annotations
 
@@ -20,9 +24,10 @@ from gold_service import get_gold_quote
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("golden-morning")
 
-HTTP_TIMEOUT = 10
-MAX_TENTATIVES = 3        # nombre d'essais d'envoi
-DELAI_RETRY = 30          # secondes entre deux essais
+HTTP_TIMEOUT = 10          # Telegram
+HTTP_TIMEOUT_WA = 30       # CallMeBot peut être lent (file d'attente)
+MAX_TENTATIVES = 3         # nombre d'essais d'envoi par canal
+DELAI_RETRY = 30           # secondes entre deux essais
 
 
 def _load_env() -> None:
@@ -79,7 +84,7 @@ def build_message() -> str:
     return "\n".join(lignes)
 
 
-def send(text: str) -> None:
+def send_telegram(text: str) -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["GOLDEN_CHAT_ID"]
     r = requests.post(
@@ -88,28 +93,93 @@ def send(text: str) -> None:
         timeout=HTTP_TIMEOUT,
     )
     r.raise_for_status()
-    logger.info("Message envoyé au chat %s", chat_id)
+    logger.info("Message Telegram envoyé au chat %s", chat_id)
+
+
+def send_whatsapp(text: str, phone: str, apikey: str) -> None:
+    """Envoi WhatsApp via CallMeBot (gratuit). Le numéro doit avoir activé la clé."""
+    r = requests.get(
+        "https://api.callmebot.com/whatsapp.php",
+        params={"phone": phone, "text": text, "apikey": apikey},
+        timeout=HTTP_TIMEOUT_WA,
+    )
+    r.raise_for_status()
+    corps = r.text.lower()
+    if "error" in corps or ("apikey" in corps and "not" in corps):
+        raise RuntimeError(f"CallMeBot a refusé l'envoi : {r.text[:200]}")
+    logger.info("Message WhatsApp envoyé à %s (CallMeBot)", phone)
+
+
+def _destinataires_whatsapp():
+    """Liste (phone, apikey) depuis le .env, dédoublonnée par numéro.
+
+    Accepte CALLMEBOT_RECIPIENTS="+33xxx:cle1,+33yyy:cle2" et/ou le couple
+    simple CALLMEBOT_PHONE + CALLMEBOT_APIKEY.
+    """
+    rec = []
+    bulk = os.environ.get("CALLMEBOT_RECIPIENTS", "").strip()
+    if bulk:
+        for item in bulk.split(","):
+            item = item.strip()
+            if not item or ":" not in item:
+                continue
+            phone, _, cle = item.partition(":")
+            rec.append((phone.strip(), cle.strip()))
+    phone = os.environ.get("CALLMEBOT_PHONE", "").strip()
+    cle = os.environ.get("CALLMEBOT_APIKEY", "").strip()
+    if phone and cle:
+        rec.append((phone, cle))
+    dedup = {}
+    for p, k in rec:
+        if p and k:
+            dedup[p] = k
+    return list(dedup.items())
+
+
+def _canaux():
+    """Liste des canaux configurés : (nom, fonction d'envoi prenant le texte)."""
+    canaux = []
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("GOLDEN_CHAT_ID"):
+        canaux.append(("Telegram", send_telegram))
+    for phone, cle in _destinataires_whatsapp():
+        canaux.append(
+            (f"WhatsApp {phone}",
+             lambda text, p=phone, k=cle: send_whatsapp(text, p, k))
+        )
+    return canaux
+
+
+def _envoyer_avec_retry(nom: str, fonction, text: str) -> bool:
+    """Tente l'envoi sur un canal, avec retry. True si réussi."""
+    for tentative in range(1, MAX_TENTATIVES + 1):
+        try:
+            fonction(text)
+            return True
+        except Exception as exc:  # noqa: BLE001 - on retente
+            logger.warning(
+                "[%s] tentative %d/%d échouée (%s)",
+                nom, tentative, MAX_TENTATIVES, exc,
+            )
+            if tentative < MAX_TENTATIVES:
+                time.sleep(DELAI_RETRY)
+    logger.error("[%s] envoi définitivement échoué", nom)
+    return False
 
 
 def main() -> None:
     _load_env()
-    derniere_exc: Exception | None = None
-    for tentative in range(1, MAX_TENTATIVES + 1):
-        try:
-            send(build_message())
-            return
-        except Exception as exc:  # noqa: BLE001 - on retente
-            derniere_exc = exc
-            logger.warning(
-                "Tentative %d/%d échouée (%s)", tentative, MAX_TENTATIVES, exc
-            )
-            if tentative < MAX_TENTATIVES:
-                time.sleep(DELAI_RETRY)
-    logger.error(
-        "Envoi du cours de l'or définitivement échoué après %d tentatives : %s",
-        MAX_TENTATIVES, derniere_exc,
-    )
-    raise SystemExit(1)
+    canaux = _canaux()
+    if not canaux:
+        logger.error("Aucun canal configuré (ni Telegram ni WhatsApp) dans .env")
+        raise SystemExit(1)
+
+    text = build_message()
+    resultats = {nom: _envoyer_avec_retry(nom, fn, text) for nom, fn in canaux}
+
+    if not any(resultats.values()):
+        logger.error("Échec sur TOUS les canaux : %s", resultats)
+        raise SystemExit(1)
+    logger.info("Bilan envoi : %s", resultats)
 
 
 if __name__ == "__main__":
